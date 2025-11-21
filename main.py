@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -34,6 +34,7 @@ class AnalyzeResponse(BaseModel):
     sections: Dict[str, Any]
     recommendations: List[str]
     highlights: List[str]
+    advanced: Optional[Dict[str, Any]] = None
 
 
 @app.get("/")
@@ -161,13 +162,79 @@ def suggest_highlights(resume_text: str) -> List[str]:
     return highlights[:5]
 
 
-@app.post("/analyze", response_model=AnalyzeResponse)
-def analyze_resume(payload: AnalyzeRequest):
-    resume = payload.resume_text.strip()
-    if not resume:
-        raise HTTPException(status_code=400, detail="Resume text is required")
+def generate_advanced_metrics(text: str, jd: str) -> Dict[str, Any]:
+    import re
+    lower = text.lower()
+    # Basic contact info
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    phones = re.findall(r"(?:(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4})", text)
+    linkedin = re.findall(r"https?://(www\.)?linkedin\.com/[A-Za-z0-9_\-/]+", text, flags=re.I)
 
-    jd = (payload.job_description or "").strip()
+    # Skills dictionary (expandable)
+    skills_bank = [
+        'python','java','javascript','typescript','react','node','fastapi','django','flask','aws','gcp','azure','docker','kubernetes','sql','nosql','mongodb','postgres','redis','graphql','rest','ci','cd','linux','git','pandas','numpy','scikit','tensorflow','pytorch','spark','hadoop','airflow','kafka','terraform','ansible'
+    ]
+    skills_detected = sorted({s for s in skills_bank if s in lower})
+
+    # Action verbs analysis
+    verbs = [
+        'led','owned','delivered','built','designed','implemented','optimized','improved','launched','migrated','automated','architected','scaled','mentored','managed','shipped','deployed','integrated','analyzed','refactored'
+    ]
+    strong_verbs_used = sorted({v for v in verbs if re.search(rf"\b{v}\b", lower)})
+    action_verb_count = sum(len(re.findall(rf"\b{v}\b", lower)) for v in verbs)
+
+    # Tense check: look for past tense vs present in bullets
+    past = len(re.findall(r"\b(ed)\b", lower))
+    present = len(re.findall(r"\b(ing)\b", lower))
+    tense = "balanced" if abs(past-present) <= 5 else ("past-heavy" if past>present else "present-heavy")
+
+    # Dates coverage and gaps
+    dates = re.findall(r"(20\d{2}|19\d{2})", text)
+    years = sorted({int(y) for y in dates})
+    coverage = {"years_mentioned": years, "min_year": min(years) if years else None, "max_year": max(years) if years else None}
+    gaps = []
+    if len(years) >= 2:
+        for a, b in zip(years, years[1:]):
+            if b - a > 2:
+                gaps.append({"from": a, "to": b, "gap_years": b - a})
+
+    # Education/degree detection
+    degrees = re.findall(r"(?i)(b\.?sc\.?|m\.?sc\.?|bachelor|master|ph\.?d\.?|mba|b\.?tech|m\.?tech)", text)
+
+    # Bullet quality
+    bullets = [line.strip() for line in text.splitlines() if line.strip().startswith(('-', '•', '*'))]
+    avg_bullet_len = round(sum(len(b) for b in bullets)/max(1, len(bullets)), 1) if bullets else 0
+
+    # JD alignment top missing
+    jd_keywords = extract_keywords(jd) if jd else []
+    resume_keywords = extract_keywords(text)
+    top_missing = sorted(list(set(jd_keywords) - set(resume_keywords)))[:15]
+
+    # Pages estimate
+    pages = text.count('\f') or None
+
+    return {
+        "contact": {
+            "emails": emails[:2],
+            "phones": phones[:2],
+            "linkedin": linkedin[:2]
+        },
+        "skills_detected": skills_detected,
+        "action_verbs_count": action_verb_count,
+        "strong_verbs_used": strong_verbs_used,
+        "tense": tense,
+        "date_coverage": coverage,
+        "gaps": gaps,
+        "degrees": list({d[0] if isinstance(d, tuple) else d for d in degrees})[:5] if degrees else [],
+        "avg_bullet_length": avg_bullet_len,
+        "top_missing_from_jd": top_missing,
+        "pages": pages,
+    }
+
+
+def analyze_text(resume: str, jd: str, email: Optional[str], premium: bool) -> AnalyzeResponse:
+    if not resume.strip():
+        raise HTTPException(status_code=400, detail="Resume text is required")
 
     resume_keywords = extract_keywords(resume)
     jd_keywords = extract_keywords(jd) if jd else []
@@ -192,12 +259,13 @@ def analyze_resume(payload: AnalyzeRequest):
     highlights = suggest_highlights(resume)
 
     # Premium extras: deeper checks and more suggestions
-    if payload.premium:
-        # Add a couple of extra heuristics for premium users
+    if premium:
         if jd_keywords:
             recs.append("Premium: Mirror phrasing from the job description for top keywords, where authentic.")
         recs.append("Premium: Quantify impact with concrete numbers (%, $, time saved).")
         recs.append("Premium: Add a tailored summary using the target role title.")
+
+    advanced = generate_advanced_metrics(resume, jd) if premium else {}
 
     result = AnalyzeResponse(
         ats_score=score,
@@ -208,15 +276,16 @@ def analyze_resume(payload: AnalyzeRequest):
         sections=sections,
         recommendations=recs,
         highlights=highlights,
+        advanced=advanced or None,
     )
 
     # Persist analysis
     try:
         _doc = ResumeAnalysis(
-            email=payload.email,
+            email=email,
             resume_text=resume,
             job_description=jd or None,
-            premium=payload.premium,
+            premium=premium,
             ats_score=result.ats_score,
             keyword_match_rate=result.keyword_match_rate,
             matched_keywords=result.matched_keywords,
@@ -228,10 +297,42 @@ def analyze_resume(payload: AnalyzeRequest):
         )
         create_document("resumeanalysis", _doc)
     except Exception:
-        # Swallow DB errors to keep API responsive even if DB is down
         pass
 
     return result
+
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+def analyze_resume(payload: AnalyzeRequest):
+    jd = (payload.job_description or "").strip()
+    return analyze_text(payload.resume_text, jd, payload.email, payload.premium)
+
+
+def extract_pdf_text(file_bytes: bytes) -> str:
+    try:
+        from pdfminer.high_level import extract_text
+        import io
+        return extract_text(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)[:120]}")
+
+
+@app.post("/analyze/pdf", response_model=AnalyzeResponse)
+async def analyze_pdf(
+    file: UploadFile = File(...),
+    job_description: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    premium: Optional[bool] = Form(False),
+):
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    content = await file.read()
+    text = extract_pdf_text(content)
+    jd = (job_description or "").strip()
+    # premium comes as string sometimes
+    if isinstance(premium, str):
+        premium = premium.lower() in ("1","true","yes","on")
+    return analyze_text(text, jd, email, bool(premium))
 
 
 @app.get("/history")
