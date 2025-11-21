@@ -11,38 +11,46 @@ Model name is converted to lowercase for the collection name:
 - BlogPost -> "blogs" collection
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional, List, Dict, Any
 
-# Example schemas (replace with your own):
-
+# Core user schema to support premium access
 class User(BaseModel):
     """
     Users collection schema
     Collection name: "user" (lowercase of class name)
     """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    email: EmailStr = Field(..., description="Email address")
+    name: Optional[str] = Field(None, description="Full name")
+    is_premium: bool = Field(False, description="Premium subscription flag")
 
+
+class ResumeAnalysis(BaseModel):
+    """
+    Resume analyses collection schema
+    Collection name: "resumeanalysis"
+    """
+    email: Optional[EmailStr] = Field(None, description="User email if provided")
+    resume_text: str = Field(..., description="Raw resume text pasted by user")
+    job_description: Optional[str] = Field(None, description="Target job description text")
+    premium: bool = Field(False, description="Whether premium features were used for this analysis")
+
+    # Computed results
+    ats_score: int = Field(..., ge=0, le=100, description="Overall ATS compatibility score")
+    keyword_match_rate: float = Field(..., ge=0, le=1, description="Ratio of matched keywords")
+    matched_keywords: List[str] = Field(default_factory=list)
+    missing_keywords: List[str] = Field(default_factory=list)
+
+    readability: Dict[str, Any] = Field(default_factory=dict, description="Readability metrics")
+    sections: Dict[str, Any] = Field(default_factory=dict, description="Section-by-section grades and notes")
+    recommendations: List[str] = Field(default_factory=list, description="Actionable recommendations")
+    highlights: List[str] = Field(default_factory=list, description="Suggested achievement-focused bullet points")
+
+
+# Example schema retained for reference (not used by the app directly)
 class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
-
-# Add your own schemas here:
-# --------------------------------------------------
-
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+    title: str
+    description: Optional[str] = None
+    price: float
+    category: str
+    in_stock: bool = True
